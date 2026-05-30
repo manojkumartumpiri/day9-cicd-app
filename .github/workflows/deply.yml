@@ -1,9 +1,17 @@
-name: Production Deployment
+name: AWS Production Deployment
 
 on:
   push:
     branches:
       - main
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-southeast-2
+  ECR_REPOSITORY: day9
 
 jobs:
   deploy:
@@ -11,34 +19,56 @@ jobs:
 
     steps:
 
-    - name: Checkout Code
-      uses: actions/checkout@v3
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
 
-    - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v2
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ secrets.AWS_REGION }}
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
 
-    - name: Login to ECR
-      run: |
-        aws ecr get-login-password --region ap-southeast-2 \
-        | docker login --username AWS --password-stdin 865950114072.dkr.ecr.ap-southeast-2.amazonaws.com
+      - name: Verify AWS Identity
+        run: aws sts get-caller-identity
 
-    - name: Build Docker Image
-      run: |
-        docker build -t day9 .
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Tag Docker Image
-      run: |
-        docker tag day9:latest 865950114072.dkr.ecr.ap-southeast-2.amazonaws.com/day9:latest
+      - name: Set Image Tag
+        run: |
+          echo "IMAGE_TAG=${GITHUB_SHA}" >> $GITHUB_ENV
 
-    - name: Push Docker Image
-      run: |
-        docker push 865950114072.dkr.ecr.ap-southeast-2.amazonaws.com/day9:latest
+      - name: Build Docker Image
+        run: |
+          docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
 
-    - name: Trigger ASG Instance Refresh
-      run: |
-        aws autoscaling start-instance-refresh \
-        --auto-scaling-group-name asg-day9
+      - name: Tag Docker Image
+        run: |
+          docker tag \
+          $ECR_REPOSITORY:$IMAGE_TAG \
+          ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Push Docker Image
+        run: |
+          docker push \
+          ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Update Latest Tag
+        run: |
+          docker tag \
+          ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG \
+          ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:latest
+
+          docker push \
+          ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:latest
+
+      - name: Start ASG Instance Refresh
+        run: |
+          aws autoscaling start-instance-refresh \
+          --auto-scaling-group-name asg-day9
+
+      - name: Display Deployment Details
+        run: |
+          echo "Deployment completed"
+          echo "Image Tag: $IMAGE_TAG"
